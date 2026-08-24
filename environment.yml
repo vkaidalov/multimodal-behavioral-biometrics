@@ -1,0 +1,9 @@
+name: multimodal-behavioral-biometrics
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14.*
+  - numpy=2.5.*
+  - pandas=3.0.*
+  - scikit-learn=1.9.*
+  - pytorch=2.13.*
