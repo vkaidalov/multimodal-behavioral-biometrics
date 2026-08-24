@@ -23,6 +23,7 @@ import re
 import sys
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -55,11 +56,32 @@ def p(msg: str = "") -> None:
     print(msg, flush=True)
 
 
-def elapsed(seconds: float) -> str:
-    """Format a duration consistently for pipeline-stage progress logs."""
+def format_duration(seconds: float) -> str:
+    """Human-readable elapsed time for pipeline logs."""
+    seconds = max(0.0, float(seconds))
     if seconds < 60:
         return f"{seconds:.1f}s"
-    return f"{seconds / 60:.1f}m"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {sec:.1f}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m {sec:.1f}s"
+
+
+@contextmanager
+def stage(name: str):
+    """Log the start, completion/failure, and wall-clock duration of a pipeline stage."""
+    started = time.perf_counter()
+    p(f"\n[stage] START  {name}")
+    try:
+        yield
+    except Exception:
+        elapsed = time.perf_counter() - started
+        p(f"[stage] FAILED {name} | elapsed={format_duration(elapsed)}")
+        raise
+    else:
+        elapsed = time.perf_counter() - started
+        p(f"[stage] DONE   {name} | elapsed={format_duration(elapsed)}")
 
 
 def seed_everything(seed: int) -> None:
@@ -365,12 +387,10 @@ def synchronize_session(
 
 
 def prepare_dataset(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] prepare: started")
+    prepare_t0 = time.perf_counter()
     seed_everything(args.seed)
-    discovery_start = time.perf_counter()
-    sessions = discover_sessions(args.data_root)
-    p(f"[timing] prepare/discover sessions: {elapsed(time.perf_counter() - discovery_start)}")
+    with stage("Discover HMOG sensor sessions"):
+        sessions = discover_sessions(args.data_root)
     by_user: Dict[str, List[SessionFiles]] = defaultdict(list)
     for s in sessions:
         by_user[s.user_id].append(s)
@@ -396,6 +416,7 @@ def prepare_dataset(args) -> None:
         if args.max_users and len(selected) >= args.max_users:
             break
         p(f"\n[prepare] User candidate {candidate_i}/{len(candidates)}: {uid}")
+        user_t0 = time.perf_counter()
         user_chunks = []
         segment_lengths = []
         seconds_total = 0.0
@@ -455,6 +476,7 @@ def prepare_dataset(args) -> None:
         }
         selected.append(uid)
         p(f"[prepare][OK] User {uid}: saved {out.shape[0]:,} x 6 samples -> {out_path}")
+        p(f"[prepare][TIME] User {uid}: {format_duration(time.perf_counter()-user_t0)}")
 
     manifest = {
         "fs": args.fs,
@@ -474,7 +496,7 @@ def prepare_dataset(args) -> None:
     if len(selected) != args.max_users and args.max_users:
         p(f"[prepare][WARN] Requested max {args.max_users}, got {len(selected)} users.")
     p(f"[prepare] Manifest: {work / 'manifest.json'}")
-    p(f"[timing] prepare: completed in {elapsed(time.perf_counter() - stage_start)}")
+    p(f"[prepare] Total preparation time: {format_duration(time.perf_counter()-prepare_t0)}")
 
 
 # ---------------------------------------------------------------------------
@@ -539,14 +561,13 @@ def preprocess_window(raw: np.ndarray, domain: str) -> np.ndarray:
     if domain == "time":
         z = row_standardize(t)
     elif domain == "frequency":
-        # Paper: FFT each sensor row, stack real and imaginary parts sequentially,
-        # then StandardScaler each resulting row.
+        # Paper defines Ft as d x 2n (d=6): for each sensor-axis row,
+        # concatenate its FFT real and imaginary parts, then StandardScaler
+        # is applied to that complete row. For a 5 s / 100 Hz window this is
+        # 6 x 1000, not 12 x 500.
         f = np.fft.fft(t, axis=1)
-        rows = []
-        for i in range(t.shape[0]):
-            rows.append(f[i].real)
-            rows.append(f[i].imag)
-        z = row_standardize(np.asarray(rows, dtype=np.float32))  # 12 x n
+        z = np.concatenate([f.real, f.imag], axis=1).astype(np.float32)  # 6 x (2n)
+        z = row_standardize(z)
     else:
         raise ValueError(domain)
     flat = z.reshape(-1)
@@ -676,10 +697,17 @@ class DeFFusionCNN(nn.Module):
         else:
             raise ValueError(conv2_mode)
 
-        # For 5s, the paper's (1,5) / (1,12) AvgPool reduces width 34/72 to 6.
-        # Adaptive pooling gives exactly the same output dimensions for 5s and
-        # permits the paper's 1-10 s window-size experiment with one architecture.
-        self.avgpool = nn.AdaptiveAvgPool2d((pool_h, 6))
+        # The paper explicitly specifies AvgPool (1,5) for time-domain data
+        # and (1,12) for frequency-domain data. Use those exact kernels for
+        # the principal 5-second experiment rather than adaptive pooling.
+        # For other window sizes, adaptive pooling preserves a six-column
+        # output so the window-size sweep remains runnable.
+        if domain == "time":
+            self.avgpool = nn.AvgPool2d(kernel_size=(1, 5), stride=(1, 5))
+        elif domain == "frequency":
+            self.avgpool = nn.AvgPool2d(kernel_size=(1, 12), stride=(1, 12))
+        else:
+            raise ValueError(domain)
         flat = 64 * pool_h * 6
         self.fc1 = nn.Linear(flat, 3072)
         self.fc2 = nn.Linear(3072, 512)
@@ -760,6 +788,7 @@ def train_one_cnn(
     p(f"[train:{domain}] LR={args.lr}, StepLR step={args.lr_step}, gamma=0.1")
     t0 = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
+        epoch_t0 = time.perf_counter()
         model.train()
         total_loss = 0.0
         correct = 0
@@ -785,7 +814,9 @@ def train_one_cnn(
         p(
             f"[train:{domain}] epoch {epoch:03d}/{args.epochs} DONE "
             f"loss={total_loss/max(seen,1):.5f} acc={100*correct/max(seen,1):.2f}% "
-            f"lr={optimizer.param_groups[0]['lr']:.3g} elapsed={elapsed(time.perf_counter() - t0)}"
+            f"lr={optimizer.param_groups[0]['lr']:.3g} "
+            f"epoch_time={format_duration(time.perf_counter()-epoch_t0)} "
+            f"total_time={format_duration(time.perf_counter()-t0)}"
         )
 
     payload = {
@@ -799,7 +830,7 @@ def train_one_cnn(
     }
     torch.save(payload, output_path)
     p(f"[train:{domain}] Saved: {output_path}")
-    p(f"[timing] train:{domain}: completed in {elapsed(time.perf_counter() - t0)}")
+    p(f"[train:{domain}] Total training time: {format_duration(time.perf_counter()-t0)}")
 
 
 def load_model(path: Path, device: torch.device) -> Tuple[DeFFusionCNN, dict]:
@@ -823,11 +854,11 @@ def extract_features(
         d = np.load(out_path)
         return d["X"], d["y"]
     device = parse_device(args.device)
-    stage_start = time.perf_counter()
     model, payload = load_model(model_path, device)
     dataset = HMOGWindowDataset(manifest, refs, domain)
     loader = _make_loader(dataset, args.batch_size, False, args.workers, args.seed)
     xs, ys = [], []
+    extract_t0 = time.perf_counter()
     p(f"[features:{domain}] Extracting from {len(dataset):,} windows")
     with torch.no_grad():
         for bi, (x, y) in enumerate(loader, 1):
@@ -841,7 +872,7 @@ def extract_features(
     y = np.concatenate(ys, axis=0)
     np.savez_compressed(out_path, X=X, y=y)
     p(f"[features:{domain}] Saved {X.shape}: {out_path}")
-    p(f"[timing] features:{domain}: completed in {elapsed(time.perf_counter() - stage_start)}")
+    p(f"[features:{domain}] Total extraction time: {format_duration(time.perf_counter()-extract_t0)}")
     return X, y
 
 
@@ -857,7 +888,6 @@ def fit_fa_fusion(
         p(f"[fusion] Loading cached fused features: {fused_path}")
         return np.load(fused_path)["X"]
 
-    stage_start = time.perf_counter()
     nt, nf = args.time_factors, args.freq_factors
     if args.feature_source == "fc2" and max(nt, nf) > 512:
         raise ValueError("Too many FA factors")
@@ -875,46 +905,56 @@ def fit_fa_fusion(
         fit_t, fit_f = Xtime, Xfreq
     t0 = time.perf_counter()
     fa_t.fit(fit_t)
-    p(f"[fusion] Time-domain FA fit done in {elapsed(time.perf_counter() - t0)}")
+    p(f"[fusion] Time-domain FA fit done in {format_duration(time.perf_counter()-t0)}")
     t0 = time.perf_counter()
     fa_f.fit(fit_f)
-    p(f"[fusion] Frequency-domain FA fit done in {elapsed(time.perf_counter() - t0)}")
+    p(f"[fusion] Frequency-domain FA fit done in {format_duration(time.perf_counter()-t0)}")
+    t0 = time.perf_counter()
     Ft = fa_t.transform(Xtime).astype(np.float32)
     Ff = fa_f.transform(Xfreq).astype(np.float32)
+    p(f"[fusion] FA transforms done in {format_duration(time.perf_counter()-t0)}")
     fused = np.concatenate([Ft, Ff], axis=1).astype(np.float32)
     joblib.dump(fa_t, out_dir / "fa_time.joblib")
     joblib.dump(fa_f, out_dir / "fa_frequency.joblib")
     np.savez_compressed(fused_path, X=fused, y=y)
     p(f"[fusion] Saved fused features {fused.shape}: {fused_path}")
-    p(f"[timing] fusion: completed in {elapsed(time.perf_counter() - stage_start)}")
     return fused
 
 
 def train_pipeline(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] train pipeline: started")
+    pipeline_t0 = time.perf_counter()
     seed_everything(args.seed)
     work = Path(args.work_dir)
-    manifest = load_manifest(work)
-    if len(manifest["selected_users"]) < 2:
-        raise RuntimeError("Need at least two users.")
-    if len(manifest["selected_users"]) != 95:
-        p(f"[train][WARN] Paper used 95 users; manifest contains {len(manifest['selected_users'])}.")
 
-    refs, counts = build_window_refs(manifest, args.window, args.max_windows_per_user)
-    p(f"[train] Window size={args.window:g}s. Total windows={len(refs):,}")
-    p(f"[train] Per-user windows: min={min(counts.values())}, median={np.median(list(counts.values())):.0f}, max={max(counts.values())}")
+    with stage("Load prepared dataset manifest"):
+        manifest = load_manifest(work)
+        if len(manifest["selected_users"]) < 2:
+            raise RuntimeError("Need at least two users.")
+        if len(manifest["selected_users"]) != 95:
+            p(f"[train][WARN] Paper used 95 users; manifest contains {len(manifest['selected_users'])}.")
+
+    with stage(f"Build {args.window:g}s authentication-window index"):
+        refs, counts = build_window_refs(manifest, args.window, args.max_windows_per_user)
+        p(f"[train] Window size={args.window:g}s. Total windows={len(refs):,}")
+        p(f"[train] Per-user windows: min={min(counts.values())}, median={np.median(list(counts.values())):.0f}, max={max(counts.values())}")
+
     time_model, freq_model, model_root = model_paths(work, args.window)
-    train_one_cnn(manifest, refs, "time", time_model, args)
-    train_one_cnn(manifest, refs, "frequency", freq_model, args)
+    with stage("Train time-domain CNN"):
+        train_one_cnn(manifest, refs, "time", time_model, args)
+    with stage("Train frequency-domain CNN"):
+        train_one_cnn(manifest, refs, "frequency", freq_model, args)
 
     fdir = feature_dir(work, args.window)
-    Xt, yt = extract_features(manifest, refs, "time", time_model, fdir / "time_deep.npz", args)
-    Xf, yf = extract_features(manifest, refs, "frequency", freq_model, fdir / "frequency_deep.npz", args)
+    with stage("Extract time-domain deep features"):
+        Xt, yt = extract_features(manifest, refs, "time", time_model, fdir / "time_deep.npz", args)
+    with stage("Extract frequency-domain deep features"):
+        Xf, yf = extract_features(manifest, refs, "frequency", freq_model, fdir / "frequency_deep.npz", args)
     if not np.array_equal(yt, yf):
         raise RuntimeError("Time/frequency labels do not align")
-    fused = fit_fa_fusion(Xt, Xf, yt, fdir, args)
-    save_json(
+    with stage("Factor Analysis and time/frequency feature fusion"):
+        fused = fit_fa_fusion(Xt, Xf, yt, fdir, args)
+    with stage("Save feature-pipeline metadata"):
+        save_json(
         {
             "window": args.window,
             "feature_source": args.feature_source,
@@ -929,10 +969,9 @@ def train_pipeline(args) -> None:
                 "FactorAnalysis implementation is not specified in paper",
             ],
         },
-        fdir / "feature_config.json",
-    )
-    p("[train] DONE: CNNs trained and 50-dimensional fused features created.")
-    p(f"[timing] train pipeline: completed in {elapsed(time.perf_counter() - stage_start)}")
+            fdir / "feature_config.json",
+        )
+    p(f"[train] DONE: CNNs trained and fused features created. Total pipeline time: {format_duration(time.perf_counter()-pipeline_t0)}")
 
 
 # ---------------------------------------------------------------------------
@@ -975,7 +1014,6 @@ def evaluate_ocsvm_user(
     seed: int,
     print_prefix: str,
 ) -> Dict[str, float]:
-    stage_start = time.perf_counter()
     rng_master = np.random.default_rng(seed)
     repeat_metrics = []
     n_pos_all = X_pos.shape[0]
@@ -1020,7 +1058,6 @@ def evaluate_ocsvm_user(
         repeat_metrics.append((eer, far, frr))
         p(f"{print_prefix} repeat {rep+1:02d}/{repeats}: EER={100*eer:.3f}% FAR={100*far:.3f}% FRR={100*frr:.3f}%")
     a = np.asarray(repeat_metrics)
-    p(f"[timing] {print_prefix}: completed in {elapsed(time.perf_counter() - stage_start)}")
     return {
         "eer": float(a[:, 0].mean()),
         "far": float(a[:, 1].mean()),
@@ -1050,19 +1087,19 @@ def evaluate_features_ocsvm(
     gamma: Union[str, float],
     seed: int,
 ) -> pd.DataFrame:
-    stage_start = time.perf_counter()
     rows = []
     for ui, uid in enumerate(users):
         Xp = X[y == ui]
         Xn = X[y != ui]
         p(f"\n[evaluate] User {ui+1}/{len(users)} {uid}: positives={len(Xp):,}, impostor pool={len(Xn):,}")
+        user_t0 = time.perf_counter()
         m = evaluate_ocsvm_user(
             Xp, Xn, folds, repeats, positive_limit, nu, gamma,
             seed + ui * 100003,
             print_prefix=f"[evaluate:{uid}]",
         )
         rows.append({"user_id": uid, **m})
-    p(f"[timing] OC-SVM evaluation for {len(users)} users: completed in {elapsed(time.perf_counter() - stage_start)}")
+        p(f"[evaluate:{uid}] user total: {format_duration(time.perf_counter()-user_t0)}")
     return pd.DataFrame(rows)
 
 
@@ -1077,25 +1114,28 @@ def print_metric_summary(df: pd.DataFrame, label: str) -> Dict[str, dict]:
 
 
 def evaluate_command(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] evaluate: started")
+    eval_t0 = time.perf_counter()
     seed_everything(args.seed)
     work = Path(args.work_dir)
-    manifest = load_manifest(work)
-    X, y = load_fused_features(work, args.window)
+    with stage("Load manifest and fused features"):
+        manifest = load_manifest(work)
+        X, y = load_fused_features(work, args.window)
     gamma = _gamma_arg(args.ocsvm_gamma)
     p("[evaluate] Paper protocol: 10-fold CV, balanced negative test samples, repeat 20 times.")
     p(f"[evaluate] Current: folds={args.folds}, repeats={args.repeats}, positive_limit={args.positive_limit}")
     p(f"[evaluate][GAP] OC-SVM nu/gamma are not reported by paper. Using nu={args.ocsvm_nu}, gamma={gamma}.")
-    df = evaluate_features_ocsvm(
-        X, y, manifest["selected_users"], args.folds, args.repeats,
-        args.positive_limit, args.ocsvm_nu, gamma, args.seed,
-    )
-    summary = print_metric_summary(df, f"DeFFusion {args.window:g}s")
+    with stage("Per-user repeated OC-SVM cross-validation"):
+        df = evaluate_features_ocsvm(
+            X, y, manifest["selected_users"], args.folds, args.repeats,
+            args.positive_limit, args.ocsvm_nu, gamma, args.seed,
+        )
+    with stage("Aggregate authentication metrics"):
+        summary = print_metric_summary(df, f"DeFFusion {args.window:g}s")
     outdir = ensure_dir(work / "results")
     tag = f"deffusion_w{args.window:g}s"
-    df.to_csv(outdir / f"{tag}_per_user.csv", index=False)
-    save_json({
+    with stage("Save evaluation results"):
+        df.to_csv(outdir / f"{tag}_per_user.csv", index=False)
+        save_json({
         "summary_percent": summary,
         "settings": {
             "window": args.window,
@@ -1114,9 +1154,9 @@ def evaluate_command(args) -> None:
             "table7_far": 1.42,
             "table7_frr": 0.75,
         },
-    }, outdir / f"{tag}_summary.json")
+        }, outdir / f"{tag}_summary.json")
     p(f"[evaluate] Saved results under {outdir}")
-    p(f"[timing] evaluate: completed in {elapsed(time.perf_counter() - stage_start)}")
+    p(f"[evaluate] Total evaluation time: {format_duration(time.perf_counter()-eval_t0)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1139,7 +1179,6 @@ def training_size_sweep(args) -> None:
     gamma = _gamma_arg(args.ocsvm_gamma)
     rows = []
     for n in args.sizes:
-        stage_start = time.perf_counter()
         p(f"\n######## TRAINING-SIZE SWEEP: n={n} ########")
         df = evaluate_features_ocsvm(
             X, y, manifest["selected_users"], args.folds, args.repeats,
@@ -1151,7 +1190,7 @@ def training_size_sweep(args) -> None:
         if target:
             row.update({"paper_mean": target[0], "paper_median": target[1], "paper_sd": target[2]})
         rows.append(row)
-        p(f"[training-size] n={n}: mean={s['mean']:.3f}, median={s['median']:.3f}, sd={s['sd']:.3f}; elapsed={elapsed(time.perf_counter() - stage_start)}")
+        p(f"[training-size] n={n}: mean={s['mean']:.3f}, median={s['median']:.3f}, sd={s['sd']:.3f}")
     out = pd.DataFrame(rows)
     outdir = ensure_dir(work / "results")
     out.to_csv(outdir / f"training_size_w{args.window:g}s.csv", index=False)
@@ -1208,7 +1247,6 @@ def compute_designed_features(manifest: dict, refs: Sequence[WindowRef], fs: int
         return d["X"], d["y"]
     maps = {}
     rows, labels = [], []
-    stage_start = time.perf_counter()
     p(f"[designed] Computing 90 features for {len(refs):,} windows.")
     for i, r in enumerate(refs, 1):
         if r.user_id not in maps:
@@ -1223,13 +1261,10 @@ def compute_designed_features(manifest: dict, refs: Sequence[WindowRef], fs: int
     y = np.asarray(labels, dtype=np.int16)
     np.savez_compressed(out_path, X=X, y=y)
     p(f"[designed] Saved {X.shape}: {out_path}")
-    p(f"[timing] designed feature extraction: completed in {elapsed(time.perf_counter() - stage_start)}")
     return X, y
 
 
 def designed_baseline(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] designed baseline: started")
     work = Path(args.work_dir)
     manifest = load_manifest(work)
     refs, _ = build_window_refs(manifest, args.window, args.max_windows_per_user)
@@ -1244,13 +1279,11 @@ def designed_baseline(args) -> None:
         d = np.load(transformed_path)
         X = d["X"]
     else:
-        fa_start = time.perf_counter()
         p("[designed][GAP] Paper does not specify exact FA/fusion handling for the 90 designed features; using FA(50).")
         fa = FactorAnalysis(n_components=min(50, X90.shape[1]), random_state=args.seed)
         X = fa.fit_transform(X90).astype(np.float32)
         joblib.dump(fa, fa_path)
         np.savez_compressed(transformed_path, X=X, y=y)
-        p(f"[timing] designed FA/fusion: completed in {elapsed(time.perf_counter() - fa_start)}")
 
     gamma = _gamma_arg(args.ocsvm_gamma)
     df = evaluate_features_ocsvm(X, y, manifest["selected_users"], args.folds, args.repeats,
@@ -1260,7 +1293,6 @@ def designed_baseline(args) -> None:
     df.to_csv(outdir / f"designed_baseline_w{args.window:g}s_per_user.csv", index=False)
     save_json({"summary_percent": summary, "paper_target": {"eer": 9.00, "far": 8.96, "frr": 9.04}},
               outdir / f"designed_baseline_w{args.window:g}s_summary.json")
-    p(f"[timing] designed baseline: completed in {elapsed(time.perf_counter() - stage_start)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1278,7 +1310,6 @@ def evaluate_binary_classifier_user(
     seed: int,
     prefix: str,
 ) -> Dict[str, float]:
-    stage_start = time.perf_counter()
     master = np.random.default_rng(seed)
     rms = []
     for rep in range(repeats):
@@ -1319,13 +1350,10 @@ def evaluate_binary_classifier_user(
         rms.append((eer, far, frr))
         p(f"{prefix} repeat {rep+1:02d}/{repeats}: EER={100*eer:.3f}% FAR={100*far:.3f}% FRR={100*frr:.3f}%")
     a = np.asarray(rms)
-    p(f"[timing] {prefix}: completed in {elapsed(time.perf_counter() - stage_start)}")
     return {"eer": float(a[:,0].mean()), "far": float(a[:,1].mean()), "frr": float(a[:,2].mean())}
 
 
 def classifier_baselines(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] classifier baselines: started")
     work = Path(args.work_dir)
     manifest = load_manifest(work)
     X, y = load_fused_features(work, args.window)
@@ -1336,7 +1364,6 @@ def classifier_baselines(args) -> None:
         "dt": {"eer": 3.65, "far": 4.33, "frr": 3.29},
     }
     for kind in ["knn", "rf", "dt"]:
-        classifier_start = time.perf_counter()
         p(f"\n######## CNN-{kind.upper()} ########")
         rows = []
         for ui, uid in enumerate(manifest["selected_users"]):
@@ -1351,8 +1378,6 @@ def classifier_baselines(args) -> None:
         df.to_csv(outdir / f"cnn_{kind}_w{args.window:g}s_per_user.csv", index=False)
         save_json({"summary_percent": summary, "paper_target": targets[kind]},
                   outdir / f"cnn_{kind}_w{args.window:g}s_summary.json")
-        p(f"[timing] classifier:{kind}: completed in {elapsed(time.perf_counter() - classifier_start)}")
-    p(f"[timing] classifier baselines: completed in {elapsed(time.perf_counter() - stage_start)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1368,11 +1393,8 @@ PAPER_WINDOW = {
 
 
 def window_sweep(args) -> None:
-    sweep_start = time.perf_counter()
-    p("[timing] window sweep: started")
     rows = []
     for w in args.windows:
-        window_start = time.perf_counter()
         p(f"\n================ WINDOW {w}s ================")
         # Reuse train_pipeline by setting window and paper-reported balance.
         args.window = float(w)
@@ -1393,12 +1415,11 @@ def window_sweep(args) -> None:
         if target:
             row.update({"paper_mean": target[0], "paper_median": target[1], "paper_sd": target[2]})
         rows.append(row)
-        p(f"[window-sweep] {w}s -> mean={s['mean']:.3f} median={s['median']:.3f} SD={s['sd']:.3f}; elapsed={elapsed(time.perf_counter() - window_start)}")
+        p(f"[window-sweep] {w}s -> mean={s['mean']:.3f} median={s['median']:.3f} SD={s['sd']:.3f}")
     out = pd.DataFrame(rows)
     outdir = ensure_dir(Path(args.work_dir) / "results")
     out.to_csv(outdir / "window_sweep.csv", index=False)
     p("\n" + out.to_string(index=False))
-    p(f"[timing] window sweep: completed in {elapsed(time.perf_counter() - sweep_start)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1407,8 +1428,6 @@ def window_sweep(args) -> None:
 
 
 def inspect_command(args) -> None:
-    stage_start = time.perf_counter()
-    p("[timing] inspect: started")
     sessions = discover_sessions(args.data_root)
     by_user = defaultdict(list)
     for s in sessions:
@@ -1431,7 +1450,6 @@ def inspect_command(args) -> None:
         p(f"[inspect] {s.user_id}: accel rows={len(a):,}, gyro rows={len(g):,}, inferred units={au}/{gu}")
         arr, meta = synchronize_session(s.accelerometer, s.gyroscope, fs=args.fs)
         p(f"[inspect] synchronized: {arr.shape}, {meta}")
-    p(f"[timing] inspect: completed in {elapsed(time.perf_counter() - stage_start)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1465,7 +1483,7 @@ def add_train_args(sp, include_work=True):
     sp.add_argument("--time-factors", type=int, default=28)
     sp.add_argument("--freq-factors", type=int, default=22)
     sp.add_argument("--feature-source", choices=["logits", "fc2"], default="logits")
-    sp.add_argument("--conv2-mode", choices=["table_shape", "one_by_one"], default="table_shape")
+    sp.add_argument("--conv2-mode", choices=["table_shape", "one_by_one"], default="one_by_one")
     sp.add_argument("--fa-fit-max", type=int, default=None,
                     help="Optional cap on samples used to fit FA; omit for full paper-like dataset.")
     sp.add_argument("--max-windows-per-user", type=int, default=None,
@@ -1540,7 +1558,7 @@ def make_parser() -> argparse.ArgumentParser:
     sp.add_argument("--lr", type=float, default=0.001)
     sp.add_argument("--lr-step", type=int, default=50)
     sp.add_argument("--feature-source", choices=["logits", "fc2"], default="logits")
-    sp.add_argument("--conv2-mode", choices=["table_shape", "one_by_one"], default="table_shape")
+    sp.add_argument("--conv2-mode", choices=["table_shape", "one_by_one"], default="one_by_one")
     sp.add_argument("--fa-fit-max", type=int, default=None)
     sp.add_argument("--max-windows-per-user", type=int, default=None)
     sp.add_argument("--workers", type=int, default=0)
@@ -1560,19 +1578,20 @@ def main(argv=None) -> int:
     p("DeFFusion / HMOG reproduction")
     p(f"Command: {args.command}")
     p("=" * 78)
-    command_start = time.perf_counter()
+    command_t0 = time.perf_counter()
     try:
         args.func(args)
     except KeyboardInterrupt:
-        p("\n[STOP] Interrupted by user.")
+        p(f"\n[STOP] Interrupted by user after {format_duration(time.perf_counter()-command_t0)}.")
         return 130
     except Exception as e:
         p(f"\n[ERROR] {type(e).__name__}: {e}")
+        p(f"[ERROR] Command runtime before failure: {format_duration(time.perf_counter()-command_t0)}")
         if os.environ.get("DEFFUSION_DEBUG") == "1":
             raise
         p("Set DEFFUSION_DEBUG=1 to show a full traceback.")
         return 1
-    p(f"[timing] command '{args.command}': completed in {elapsed(time.perf_counter() - command_start)}")
+    p(f"\n[total] Command '{args.command}' completed in {format_duration(time.perf_counter()-command_t0)}")
     return 0
 
 
