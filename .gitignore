@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# PyCharm
+.idea/
+
 # Data folders with the input datasets and output files
 input_data/
 output_data/
