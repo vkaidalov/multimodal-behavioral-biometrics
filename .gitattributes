@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+experiments/audit_v2/*.json -text
+experiments/audit_v2/*.csv -text
+experiments/splits/*.json -text
