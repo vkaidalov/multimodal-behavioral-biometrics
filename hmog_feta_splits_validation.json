@@ -1,0 +1,213 @@
+{
+  "status": "PASS_AUDIT_CONSISTENCY",
+  "split_status": "FROZEN_VERIFIED_AGAINST_V2_AUDIT",
+  "threshold": 20,
+  "audit_version": "hmog-feta-gesture-audit-2.0.0-20261112",
+  "cohort_sizes": {
+    "FETA/iPhone 7": {
+      "train": 38,
+      "validation": 12,
+      "test": 12
+    },
+    "FETA/iPhone X": {
+      "train": 38,
+      "validation": 12,
+      "test": 12
+    },
+    "FETA/iPhone 6s": {
+      "train": 36,
+      "validation": 12,
+      "test": 12
+    },
+    "HMOG/reading_sitting": {
+      "train": 33,
+      "validation": 11,
+      "test": 12
+    },
+    "HMOG/reading_walking": {
+      "train": 46,
+      "validation": 16,
+      "test": 15
+    },
+    "HMOG/reading_combined": {
+      "train": 32,
+      "validation": 11,
+      "test": 11
+    }
+  },
+  "num_unique_users": {
+    "FETA": 184,
+    "HMOG": 79
+  },
+  "caveat": "Audit-consistency validation does not independently prove the v2.0 parsing implementation is correct.",
+  "gesture_count_balance": {
+    "FETA/iPhone 7/scroll": {
+      "train": {
+        "users": 38,
+        "mean_enrollment_gestures_2_sessions": 161.32,
+        "mean_all_4_session_gestures": 315.18,
+        "minimum_session_gestures": 21
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 160.92,
+        "mean_all_4_session_gestures": 336.25,
+        "minimum_session_gestures": 23
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 168.58,
+        "mean_all_4_session_gestures": 316.17,
+        "minimum_session_gestures": 22
+      }
+    },
+    "FETA/iPhone 7/swipe": {
+      "train": {
+        "users": 38,
+        "mean_enrollment_gestures_2_sessions": 265.76,
+        "mean_all_4_session_gestures": 510.55,
+        "minimum_session_gestures": 97
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 268.42,
+        "mean_all_4_session_gestures": 498.0,
+        "minimum_session_gestures": 100
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 265.25,
+        "mean_all_4_session_gestures": 520.42,
+        "minimum_session_gestures": 100
+      }
+    },
+    "FETA/iPhone X/scroll": {
+      "train": {
+        "users": 38,
+        "mean_enrollment_gestures_2_sessions": 143.63,
+        "mean_all_4_session_gestures": 293.0,
+        "minimum_session_gestures": 21
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 138.5,
+        "mean_all_4_session_gestures": 274.42,
+        "minimum_session_gestures": 24
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 149.5,
+        "mean_all_4_session_gestures": 285.0,
+        "minimum_session_gestures": 22
+      }
+    },
+    "FETA/iPhone X/swipe": {
+      "train": {
+        "users": 38,
+        "mean_enrollment_gestures_2_sessions": 259.18,
+        "mean_all_4_session_gestures": 516.84,
+        "minimum_session_gestures": 97
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 262.92,
+        "mean_all_4_session_gestures": 516.17,
+        "minimum_session_gestures": 99
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 261.58,
+        "mean_all_4_session_gestures": 507.67,
+        "minimum_session_gestures": 90
+      }
+    },
+    "FETA/iPhone 6s/scroll": {
+      "train": {
+        "users": 36,
+        "mean_enrollment_gestures_2_sessions": 181.17,
+        "mean_all_4_session_gestures": 332.0,
+        "minimum_session_gestures": 23
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 198.75,
+        "mean_all_4_session_gestures": 399.75,
+        "minimum_session_gestures": 26
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 211.33,
+        "mean_all_4_session_gestures": 398.33,
+        "minimum_session_gestures": 28
+      }
+    },
+    "FETA/iPhone 6s/swipe": {
+      "train": {
+        "users": 36,
+        "mean_enrollment_gestures_2_sessions": 264.86,
+        "mean_all_4_session_gestures": 515.92,
+        "minimum_session_gestures": 100
+      },
+      "validation": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 269.42,
+        "mean_all_4_session_gestures": 526.83,
+        "minimum_session_gestures": 99
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 281.83,
+        "mean_all_4_session_gestures": 543.17,
+        "minimum_session_gestures": 100
+      }
+    },
+    "HMOG/Samsung Galaxy S4/reading_sitting": {
+      "train": {
+        "users": 33,
+        "mean_enrollment_gestures_2_sessions": 142.33,
+        "mean_all_4_session_gestures": 278.42,
+        "minimum_session_gestures": 21
+      },
+      "validation": {
+        "users": 11,
+        "mean_enrollment_gestures_2_sessions": 137.55,
+        "mean_all_4_session_gestures": 274.27,
+        "minimum_session_gestures": 21
+      },
+      "test": {
+        "users": 12,
+        "mean_enrollment_gestures_2_sessions": 144.17,
+        "mean_all_4_session_gestures": 265.0,
+        "minimum_session_gestures": 21
+      }
+    },
+    "HMOG/Samsung Galaxy S4/reading_walking": {
+      "train": {
+        "users": 46,
+        "mean_enrollment_gestures_2_sessions": 119.83,
+        "mean_all_4_session_gestures": 234.3,
+        "minimum_session_gestures": 20
+      },
+      "validation": {
+        "users": 16,
+        "mean_enrollment_gestures_2_sessions": 110.38,
+        "mean_all_4_session_gestures": 221.0,
+        "minimum_session_gestures": 23
+      },
+      "test": {
+        "users": 15,
+        "mean_enrollment_gestures_2_sessions": 122.0,
+        "mean_all_4_session_gestures": 230.93,
+        "minimum_session_gestures": 21
+      }
+    }
+  },
+  "device_metadata_cross_check": {
+    "source": "user_device_mapping.csv derived from FETA userdata.csv by v1.2 (original userdata.csv not present in uploaded files)",
+    "subjects_checked": 184,
+    "all_match_status_direct_and_model_correct": true,
+    "sha256": "52b8b23beeb5939b7810b3b93fd567ea53a35cbec3f23c841a9a62bd1ed1fd8b",
+    "original_userdata_csv_not_available_in_this_sandbox": true
+  },
+  "validation_scope_note": "Fully checked against provided v2.0 summary/manifests/counts and v1.2 metadata mapping; raw gesture files are not available in sandbox for independent orientation/sensor re-extraction. Run --raw-check locally."
+}

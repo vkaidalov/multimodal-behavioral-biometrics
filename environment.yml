@@ -7,3 +7,6 @@ dependencies:
   - pandas=3.0.*
   - scikit-learn=1.9.*
   - pytorch=2.13.*
+  - jupyterlab=4.6.*
+  - matplotlib=3.11.*
+  - pymongo=4.18.*
