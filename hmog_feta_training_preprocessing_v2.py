@@ -291,7 +291,16 @@ def time_subsample(a: np.ndarray, max_len: int):
     indices=np.unique(pos)
     if len(indices)<max_len:
         remaining=np.setdiff1d(np.arange(n),indices,assume_unique=True)
-        add=sample_indices(len(remaining), min(max_len-len(indices),len(remaining)))
+        needed=max_len-len(indices)
+        # Timestamp ties can make nearest-time selection produce duplicate
+        # indices.  When exactly ONE slot is missing, sample_indices(..., 1)
+        # is intentionally invalid (it cannot preserve two endpoints).
+        # Here both endpoints have ALREADY been selected; fill the remaining
+        # slot from the middle of the as-yet unused source indices instead.
+        if needed==1:
+            add=np.array([len(remaining)//2], dtype=np.int64)
+        else:
+            add=sample_indices(len(remaining),needed)
         indices=np.sort(np.concatenate((indices,remaining[add])))
     if len(indices)>max_len:
         indices=indices[sample_indices(len(indices),max_len)]

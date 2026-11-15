@@ -224,3 +224,5 @@ __marimo__/
 input_data/
 output_data/
 deffusion_work/
+experiments/
+!experiments/splits/hmog_feta_splits_seed_20261112.json

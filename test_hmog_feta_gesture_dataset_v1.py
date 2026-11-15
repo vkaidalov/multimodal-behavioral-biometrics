@@ -134,4 +134,43 @@ class PreprocessingTests(unittest.TestCase):
         self.assertTrue(np.array_equal(dt,np.array([0.,.007,0.,.022])))
         self.assertEqual(t[-1],.029)
 
+    def test_session_scope_first_four_vs_all_available(self):
+        import shutil
+        # Synthetic training users have 5 physical sessions; the frozen
+        # session_index authorizes only 4 for the first-four experiment.
+        for i in range(101,105):
+            shutil.copytree(self.feta/'F1'/'100',self.feta/'F1'/str(i))
+        for i in range(2,6):
+            src=self.hmog/'H1'/'1'
+            dest=self.hmog/'H1'/str(i)
+            shutil.copytree(src,dest)
+            write_csv(dest/'Activity.csv',v2.H_SCHEMA['activity'],
+                      [['a1','H1',str(i),0,0,0,0,0,1,0]])
+        doc=json.loads(self.split_path.read_text())
+        doc['session_index']={
+            'FETA':{'iPhone 7':{'F1':{'swipe':['100','101','102','103']}}},
+            'HMOG':{'Samsung Galaxy S4':{'H1':{'reading_sitting':['1','2','3','4']}}}
+        }
+        self.split_path.write_text(json.dumps(doc))
+        out4=self.root/'out4'
+        base=['prepare','--splits',str(self.split_path),
+              '--feta-root',str(self.feta),'--hmog-root',str(self.hmog),
+              '--userdata',str(self.userdata),'--scenarios','feta_7_swipe,hmog_sitting',
+              '--max-users-per-scenario','0','--max-gestures-per-user','0']
+        pp.prepare(pp.parser().parse_args(base+['--session-scope','first-four','--output',str(out4)]))
+        ds4=pp.GestureDataset(out4)
+        self.assertEqual(len(ds4),8)
+        f4={x['meta']['session_id'] for x in (ds4[i] for i in range(len(ds4))) if x['meta']['dataset']=='FETA'}
+        h4={x['meta']['session_id'] for x in (ds4[i] for i in range(len(ds4))) if x['meta']['dataset']=='HMOG'}
+        self.assertEqual(f4,{'100','101','102','103'})
+        self.assertEqual(h4,{'1','2','3','4'})
+        idx=json.loads((out4/'index.json').read_text())
+        self.assertEqual(idx['settings']['session_scope'],'first-four')
+        self.assertEqual(idx['scenarios']['feta_7_swipe']['sessions_processed'],4)
+        self.assertEqual(idx['scenarios']['hmog_sitting']['sessions_processed'],4)
+        outall=self.root/'outall'
+        pp.prepare(pp.parser().parse_args(base+['--session-scope','all-available','--output',str(outall)]))
+        dsall=pp.GestureDataset(outall)
+        self.assertEqual(len(dsall),10)
+
 if __name__=='__main__':unittest.main()

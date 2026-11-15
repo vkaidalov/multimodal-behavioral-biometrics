@@ -29,7 +29,7 @@ import pandas as pd
 
 import analyze_hmog_feta_feta_criterion_v2_0 as v2
 
-VERSION = 'gesture-dataloader-prototype-1.0.0'
+VERSION = 'gesture-dataloader-prototype-1.1.0'
 TOUCH_FEATURES = ('x_screen', 'y_screen', 'dx_screen', 'dy_screen', 'elapsed_s', 'dt_s')
 MOTION_FEATURES = ('x_raw', 'y_raw', 'z_raw', 'elapsed_s', 'dt_s')
 PHONE_LOGICAL = {
@@ -251,10 +251,11 @@ def hmog_folder_session_id(folder:Path,act:pd.DataFrame):
     return folder.name
 
 
-def extract_hmog_user(root:Path,user:str,task:str):
+def extract_hmog_user(root:Path,user:str,task:str,allowed_sessions:set[str]|None=None):
     home=root/user
     if not home.is_dir():raise FileNotFoundError(home)
     records=[];stats=Counter();issues=[]
+    seen_sessions=set()
     screen=PHONE_LOGICAL['Samsung Galaxy S4']
     for folder in sorted(p for p in home.iterdir() if p.is_dir()):
         ap=v2.first_existing(folder,v2.H_FILENAMES['activity'])
@@ -268,6 +269,9 @@ def extract_hmog_user(root:Path,user:str,task:str):
                  and v2.HMOG_TASKS[int(taskids[i])]==task}
         if not mapping:continue
         sid=hmog_folder_session_id(folder,act)
+        if allowed_sessions is not None and str(sid) not in allowed_sessions:
+            continue
+        seen_sessions.add(str(sid))
         tp=v2.first_existing(folder,v2.H_FILENAMES['touch'])
         if tp is None:issues.append(f'{user}/{sid}: no touch file');continue
         touch_df=v2.read_hmog(tp,'touch')
@@ -285,17 +289,25 @@ def extract_hmog_user(root:Path,user:str,task:str):
             sample=prepare_gesture(gesture,a,g,screen,'HMOG','Samsung Galaxy S4',user,sid,task,'')
             if sample is not None:
                 records.append(sample);stats['strict_usable']+=1
+    if allowed_sessions is not None and seen_sessions != allowed_sessions:
+        raise ValueError(f'{user}/{task}: missing HMOG first-four sessions: {sorted(allowed_sessions-seen_sessions)}')
+    stats['sessions_processed']=len(seen_sessions)
     return records,stats,issues
 
 
-def extract_feta_user(root:Path,user:str,model:str,task:str,feta_coordinates:str):
+def extract_feta_user(root:Path,user:str,model:str,task:str,feta_coordinates:str,
+                      allowed_sessions:set[str]|None=None):
     home=root/user
     if not home.is_dir():raise FileNotFoundError(home)
     screen=PHONE_LOGICAL[model] if feta_coordinates=='points' else PHONE_PIXELS[model]
     records=[];stats=Counter();issues=[]
+    seen_sessions=set()
     for session in sorted(p for p in home.iterdir() if p.is_dir()):
+        if allowed_sessions is not None and session.name not in allowed_sessions:
+            continue
         tdir=session/task
         if not tdir.is_dir():continue
+        seen_sessions.add(session.name)
         for rep in sorted(p for p in tdir.iterdir() if p.is_dir()):
             touch=[]
             for f in sorted((rep/'touch_data').glob('*.csv')):
@@ -313,6 +325,9 @@ def extract_feta_user(root:Path,user:str,model:str,task:str,feta_coordinates:str
                                         session.name,task,rep.name)
                 if sample is not None:
                     records.append(sample);stats['strict_usable']+=1
+    if allowed_sessions is not None and seen_sessions != allowed_sessions:
+        raise ValueError(f'{user}/{task}: missing FETA first-four sessions: {sorted(allowed_sessions-seen_sessions)}')
+    stats['sessions_processed']=len(seen_sessions)
     return records,stats,issues
 
 
@@ -369,6 +384,22 @@ def read_splits(path:Path):
     return doc
 
 
+def first_four_sessions(doc,ds,model,task,user):
+    """Read the exact chronological first-four IDs fixed at split creation.
+
+    The list is task-specific and MUST NOT be recomputed from directory names.
+    """
+    try:
+        target_model = model if ds == 'FETA' else 'Samsung Galaxy S4'
+        sessions = doc['session_index'][ds][target_model][str(user)][task]
+    except KeyError as exc:
+        raise ValueError(f'Frozen session_index missing {ds}/{model}/{user}/{task}: {exc}') from exc
+    ids = [str(s) for s in sessions]
+    if len(ids) != 4 or len(set(ids)) != 4:
+        raise ValueError(f'Frozen session_index must contain exactly 4 distinct IDs for {ds}/{user}/{task}: {ids}')
+    return set(ids)
+
+
 def get_users(doc,ds,model,task):
     if ds=='FETA':return list(doc['splits']['FETA'][model]['train'])
     return list(doc['splits']['HMOG'][task]['train'])
@@ -397,15 +428,20 @@ def prepare(args):
         rng.shuffle(users)
         if args.max_users_per_scenario>0:users=users[:args.max_users_per_scenario]
         counts[slug]={'users_requested':len(users),'users_with_samples':0,
-                      'gestures':0,'geometry_usable':0,'strict_usable':0,'contacts_seen':0}
+                      'gestures':0,'geometry_usable':0,'strict_usable':0,'contacts_seen':0,
+                      'sessions_processed':0}
         print(f'[{slug}] {len(users)} TRAIN users',flush=True)
         for n,user in enumerate(users,1):
             if ds=='FETA' and modelmap.get(user)!=model:
                 raise ValueError(f'FETA userdata.csv model mismatch: {user}: {modelmap.get(user)!r} vs {model!r}')
             try:
-                if ds=='HMOG': records,stat,errs=extract_hmog_user(Path(args.hmog_root),user,task)
-                else:records,stat,errs=extract_feta_user(Path(args.feta_root),user,model,
-                                                           task,args.feta_coordinates)
+                allowed=(first_four_sessions(doc,ds,model,task,user)
+                         if args.session_scope=='first-four' else None)
+                if ds=='HMOG':
+                    records,stat,errs=extract_hmog_user(Path(args.hmog_root),user,task,allowed)
+                else:
+                    records,stat,errs=extract_feta_user(Path(args.feta_root),user,model,
+                                                           task,args.feta_coordinates,allowed)
             except Exception as exc:
                 issues.append({'scenario':slug,'user':user,'error':f'{type(exc).__name__}: {exc}'})
                 if args.fail_on_errors:raise
@@ -436,6 +472,7 @@ def prepare(args):
          'feta_coordinates':args.feta_coordinates,
          'max_users_per_scenario':args.max_users_per_scenario,
          'max_gestures_per_user':args.max_gestures_per_user,
+         'session_scope':args.session_scope,
          'no_resampling':True,'filter':'FETA >=3, radial >5, portrait HMOG, strict paired IMU'},
          'feature_names':{'touch':TOUCH_FEATURES,'accel':MOTION_FEATURES,'gyro':MOTION_FEATURES},
          'scenarios':counts,'shards':entries,'warnings_count':len(issues)}
@@ -571,6 +608,9 @@ def parser():
     prep.add_argument('--scenarios',type=str,default='all',help='Comma-separated scenario IDs or all')
     prep.add_argument('--max-users-per-scenario',type=int,default=4,help='0 means all TRAIN users')
     prep.add_argument('--max-gestures-per-user',type=int,default=10,help='0 means all strict valid gestures')
+    prep.add_argument('--session-scope',choices=('all-available','first-four'),
+                      default='all-available',
+                      help='all-available matches frozen training protocol; first-four restricts to frozen session_index IDs')
     prep.add_argument('--feta-coordinates',choices=('points','pixels'),default='points',
                       help='FETA iOS coordinate-system assumption: default UIKit points')
     prep.add_argument('--seed',type=int,default=20261112)
